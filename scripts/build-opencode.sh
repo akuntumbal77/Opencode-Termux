@@ -247,8 +247,16 @@ def sub(pattern, repl, count=1):
 if "OPENTUI_LIB_PATH" not in text and "isBunfsPath(targetLibPath)" in text:
     # Honor an explicit OPENTUI_LIB_PATH override before the bunfs fallback.
     # (opentui >= 0.4.5 nests this inside a function, hence the \s+ indents.)
+    # On Android the native-package lookup returns undefined (no matching
+    # platform package), and isBunfsPath(undefined) then throws
+    # "undefined is not an object (evaluating '$.startsWith')" before our
+    # override can run. Guard the call so the override below always gets a turn.
     sub(
-        r'(if \(isBunfsPath\(targetLibPath\)\) \{\n\s+targetLibPath = targetLibPath\.replace\("\.\./", ""\);\n\s+\}\n)(\s+)(if \(!existsSync\d+\(targetLibPath\)\) \{)',
+        r'if \(isBunfsPath\(targetLibPath\)\) \{',
+        'if (targetLibPath && isBunfsPath(targetLibPath)) {',
+    )
+    sub(
+        r'(if \((?:targetLibPath && )?isBunfsPath\(targetLibPath\)\) \{\n\s+targetLibPath = targetLibPath\.replace\("\.\./", ""\);\n\s+\}\n)(\s+)(if \(!existsSync\d+\(targetLibPath\)\) \{)',
         r'\1\2if (process.env["OPENTUI_LIB_PATH"]) {\n\2  targetLibPath = process.env["OPENTUI_LIB_PATH"];\n\2}\n\2\3',
     )
 
