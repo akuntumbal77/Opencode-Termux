@@ -2,10 +2,6 @@
 # Build libopentui.so for Android aarch64
 #
 # Usage: ./scripts/build-opentui.sh
-#
-# OpenCode's TUI renderer (@opentui/core) uses a native Zig library.
-# The upstream build targets aarch64-linux (musl), which fails on Android
-# because getauxval cannot be resolved. We build for aarch64-linux-android.
 
 set -euo pipefail
 
@@ -13,12 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/env.sh"
 
 ZIG_BIN="${ZIG_BIN:-zig}"
-
-# Pin opentui to the exact tag matching the @opentui/core version bundled by
-# the OpenCode release being built (see OPENTUI_VERSION in env.sh). Cloning
-# HEAD would build a different native ABI than the JS bindings, which crashes
-# at runtime. We still patch its Zig build so the produced .so has a
-# NEEDED: libc.so entry for Android dlopen().
 
 echo "=== Building libopentui.so for Android aarch64 ==="
 
@@ -28,7 +18,6 @@ if [ ! -d "$OPENTUI_SRC/.git" ]; then
     git clone --depth 1 --branch "v${OPENTUI_VERSION}" https://github.com/anomalyco/opentui.git "$OPENTUI_SRC"
 else
     echo ">>> opentui source exists at $OPENTUI_SRC"
-    # Ensure we are on the pinned tag
     cd "$OPENTUI_SRC"
     CURRENT=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     if [ "$CURRENT" != "v${OPENTUI_VERSION}" ]; then
@@ -47,12 +36,10 @@ if [ -f "$OPENTUI_PATCH" ] && [ "${OPENTUI_SKIP_PATCH:-}" != "1" ]; then
         git apply "$OPENTUI_PATCH"
         echo "    Patch applied successfully"
     else
-        # Check if it was already applied (idempotent re-run)
         if git apply --check --reverse "$OPENTUI_PATCH" 2>/dev/null; then
             echo "    Patch already applied, skipping"
         else
             echo "ERROR: opentui Android patch does not apply cleanly to v${OPENTUI_VERSION}"
-            echo "       Regenerate patches/opentui/android-libc-link.patch against this tag."
             exit 1
         fi
     fi
@@ -68,15 +55,16 @@ if [ ! -f "$OPENTUI_ZIG_DIR/build.zig" ]; then
 fi
 
 if [ "${OPENTUI_SKIP_ANDROID_RUNTIME_PATCH:-}" != "1" ]; then
-    echo ">>> Patching opentui Android runtime paths..."
+    echo ">>> Patching opentui Android runtime paths and build config..."
     python3 - "$OPENTUI_ZIG_DIR" <<'PY'
 import sys
+import re
 from pathlib import Path
 
 zig_dir = Path(sys.argv[1])
 lib_zig = zig_dir / "lib.zig"
 span_feed_zig = zig_dir / "native-span-feed.zig"
-
+build_zig = zig_dir / "build.zig"
 
 def replace_export_body(text: str, signature: str, body: str) -> str:
     start = text.find(signature)
@@ -98,7 +86,6 @@ def replace_export_body(text: str, signature: str, body: str) -> str:
                 break
         end += 1
     return text[:brace] + "{\n" + body.rstrip() + "\n}" + text[end:]
-
 
 lib_text = lib_zig.read_text()
 audio_bodies = {
@@ -226,14 +213,21 @@ span_text = replace_export_body(
     "    _ = stream;",
 )
 span_feed_zig.write_text(span_text)
+
+# === NEW: PENGGANTI SED, INJEKSI MENGGUNAKAN PYTHON REGEX ===
+if build_zig.exists():
+    b_text = build_zig.read_text()
+    
+    # Sisipkan linkLibC() sebelum linkLibCpp() dipanggil
+    b_text = re.sub(r'([a-zA-Z0-9_]+)\.linkLibCpp\(\);', r'\1.linkLibC();\n    \1.linkLibCpp();', b_text)
+    
+    # Sisipkan linkLibC() sebelum b.installArtifact() dipanggil
+    b_text = re.sub(r'b\.installArtifact\(([a-zA-Z0-9_]+)\);', r'\1.linkLibC();\n    b.installArtifact(\1);', b_text)
+    
+    build_zig.write_text(b_text)
+    print(">>> [Python] Successfully injected linkLibC() into build.zig", file=sys.stderr)
 PY
 fi
-
-# --- FIX UNTUK ZIG 0.15+ LIBC LINKING ---
-echo ">>> Injecting linkLibC() for Zig 0.15 compatibility..."
-find "$OPENTUI_SRC" -name "build.zig" -type f -exec sed -i 's/b.installArtifact(\(.*\));/\1.linkLibC();\n    b.installArtifact(\1);/g' {} +
-find "$OPENTUI_SRC" -name "build.zig" -type f -exec sed -i 's/\([a-zA-Z0-9_]*\)\.install();/\1.linkLibC();\n    \1.install();/g' {} +
-# ----------------------------------------
 
 echo ">>> Building with Zig (target: aarch64-linux-android)..."
 cd "$OPENTUI_ZIG_DIR"
@@ -243,9 +237,6 @@ cd "$OPENTUI_ZIG_DIR"
     -Doptimize=ReleaseFast \
     --prefix . 2>&1
 
-# The build.zig installs to dest_dir="../lib/{output_name}" relative to
-# the --prefix dir.  With --prefix=. (= OPENTUI_ZIG_DIR), the .so ends
-# up one directory above: packages/core/src/lib/aarch64-linux-android/
 LIBOPENTUI="$OPENTUI_ZIG_DIR/../lib/aarch64-linux-android/libopentui.so"
 if [ ! -f "$LIBOPENTUI" ]; then
     echo "ERROR: libopentui.so not found"
@@ -261,8 +252,6 @@ echo "Output: $LIBOPENTUI"
 echo "Size: $(du -h "$LIBOPENTUI" | cut -f1)"
 file "$LIBOPENTUI"
 
-# Show dynamic section for debugging. Android builds must include
-# NEEDED: libc.so so dlopen() can resolve symbols such as getauxval.
 echo ">>> Dynamic section of libopentui.so:"
 readelf -d "$LIBOPENTUI" 2>/dev/null | grep -E "NEEDED|FLAGS|SONAME" || echo "    (no dynamic dependencies)"
 if ! readelf -d "$LIBOPENTUI" 2>/dev/null | grep -q 'Shared library: \[libc\.so\]'; then
