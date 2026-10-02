@@ -288,6 +288,20 @@ if "const useFeedOutput = false;" not in text and "useFeedOutput" in text:
 if "  return null;\n    let lib;" not in text and "static create(options = {}) {\n    let lib;" in text:
     sub(r'(static create\(options = \{\}\) \{)\n(\s*let lib;)', r'\1\n    return null;\n\2')
 
+# Tree-sitter client: resolvePath(undefined) throws "undefined is not an object
+# (evaluating '$.startsWith')" (isUrl check) during TUI startup on Android.
+# Tolerate a missing path (that parser just fails to load) and leave a stack
+# trace in ~/resolvepath-debug.log so the caller can be identified.
+if "resolvePath(undefined)" not in text:
+    def _guard(m):
+        arg = m.group(2)
+        return (m.group(1)
+            + "    if (" + arg + " == null) {\n"
+            + "      try { process.getBuiltinModule('fs').appendFileSync((process.env.HOME || '/tmp') + '/resolvepath-debug.log', new Error('resolvePath(undefined)').stack + '\\n'); } catch (_e) {}\n"
+            + "      return " + arg + ";\n"
+            + "    }\n")
+    sub(r'(\n\s+resolvePath\((\w+)\) \{\n)', _guard)
+
 if changed:
     path.write_text(text)
     print(f"    Patched {path.name} ({sum(changed)} replacement(s))")
