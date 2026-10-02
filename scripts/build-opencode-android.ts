@@ -86,7 +86,10 @@ const result = await Bun.build({
   format: "esm",
   minify: true,
   sourcemap: "none",
-  splitting: true,
+  // Cross-chunk imports break at runtime on the Android Bun 1.2.13 runtime
+  // ("OX is not a function" from a chunk import). Bundle without chunk splitting
+  // unless OPENCODE_SPLITTING=1 is set.
+  splitting: process.env.OPENCODE_SPLITTING === "1",
   compile: {
     autoloadBunfig: false,
     autoloadDotenv: false,
