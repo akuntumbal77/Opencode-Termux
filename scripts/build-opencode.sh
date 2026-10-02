@@ -434,6 +434,64 @@ AWSEOF
     fi
 done
 
+# 7. Make opentui's normalizeLoadedFilePath null-tolerant.
+#    opentui resolves its tree-sitter parser worker at module top level:
+#      bundledTreeSitterWorkerPath = await resolveBundledFilePath(...)
+#        -> normalizeLoadedFilePath((await loadBundledFile()).default, metaUrl)
+#    `@opentui/core/parser.worker.js` is a side-effect-only script (`export {};`),
+#    so `.default` is undefined and normalizeLoadedFilePath immediately throws:
+#      "undefined is not an object (evaluating 'loadedPath.startsWith')"
+#    which kills the TUI before it draws anything. The real worker path comes
+#    from TreeSitterClient.resolveWorkerPath() (OTUI_TREE_SITTER_WORKER_PATH env
+#    or the baked-in bunfs fallback), never from this value, so returning "" is
+#    safe and lets startup continue.
+echo ">>> Patching @opentui/core normalizeLoadedFilePath (null-tolerant)..."
+mapfile -d '' -t OTUI_JS < <(find "$OPENCODE_SRC" -path '*/node_modules/@opentui/core' -type d -print0 2>/dev/null | while IFS= read -r -d '' d; do find "$d" -maxdepth 1 \( -name '*.js' -o -name '*.mjs' \) -type f -print0 2>/dev/null; done)
+if [ "${#OTUI_JS[@]}" -eq 0 ]; then
+    echo "ERROR: no @opentui/core JS files found under $OPENCODE_SRC" >&2
+    echo "       the normalizeLoadedFilePath null guard would be skipped and the TUI would" >&2
+    echo "       crash at startup with 'loadedPath.startsWith'" >&2
+    exit 1
+fi
+python3 -u - "${OTUI_JS[@]}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+scanned = found = patched = 0
+for arg in sys.argv[1:]:
+    path = Path(arg)
+    try:
+        text = path.read_text()
+    except Exception as exc:  # unreadable files are skipped
+        print(f"    {path.name}: skipped ({exc})", file=sys.stderr)
+        continue
+    scanned += 1
+    # \w* tolerates bundler-style rename collisions (normalizeLoadedFilePath2).
+    m = re.search(r"function\s+normalizeLoadedFilePath\w*\s*\(\s*([\w$]+)\s*,\s*[\w$]+\s*\)\s*\{", text)
+    if not m:
+        continue
+    found += 1
+    param = m.group(1)
+    if re.search(r"if\s*\(\s*" + re.escape(param) + r"\s*==\s*null", text[m.end():m.end() + 80]):
+        print(f"    {path.name}: already patched")
+        continue
+    text = text[:m.end()] + f'if ({param} == null) return ""; ' + text[m.end():]
+    path.write_text(text)
+    patched += 1
+    print(f"    Patched {path.name} (normalizeLoadedFilePath null guard)")
+
+if found == 0:
+    print(
+        f"WARNING: normalizeLoadedFilePath not found in any of the {scanned}"
+        " @opentui/core JS file(s); opentui's asset resolver layout may have changed"
+        " (see check_opentui_null_guard in verify-packages.sh)",
+        file=sys.stderr,
+    )
+else:
+    print(f"    normalizeLoadedFilePath guard: {patched} patched, {found - patched} already present")
+PY
+
 # Run the TypeScript build script
 # Copy it into the OpenCode tree so Bun can resolve @opentui/solid/bun-plugin
 # from node_modules (Bun resolves bare imports relative to the script file's location)

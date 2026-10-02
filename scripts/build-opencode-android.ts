@@ -75,16 +75,59 @@ await $`mkdir -p ${OUTPUT_DIR}`
 console.log("\n=== Step 3: Bundling OpenCode ===")
 const hostBinaryPath = path.join(OUTPUT_DIR, "opencode-host")
 const plugin = createSolidTransformPlugin()
+
+// The bundle emitted `import "undici"` with the namespace binding dropped, so
+// effect's Undici module ran `__reExport(exports, undici)` and crashed with
+// "undici is not defined". Resolve "undici" to a small self-contained shim built
+// from the runtime's own fetch globals instead of leaving it as a bare import.
+//
+// NOTE: in the builds we have inspected this hook never fired -- the emitted
+// graph still contains `import Undici from"undici"`, i.e. Bun maps `undici`
+// (like `ws`) to its own builtin thirdparty module before plugin onResolve
+// runs, and the runtime resolves it to builtin://thirdparty/undici. The shim is
+// kept as a fallback; the authoritative fix is the module-graph patch in Step 5.
+const undiciShim = {
+  name: "undici-shim",
+  setup(build: any) {
+    build.onResolve({ filter: /^undici$/ }, () => ({ path: "undici", namespace: "undici-shim" }))
+    build.onLoad({ filter: /.*/, namespace: "undici-shim" }, () => ({
+      loader: "js",
+      contents: `
+        const g = globalThis;
+        const unsupported = (name) => class { constructor() { throw new Error("undici." + name + " is not available in this build"); } };
+        export const fetch = (...a) => g.fetch(...a);
+        export const Headers = g.Headers;
+        export const Request = g.Request;
+        export const Response = g.Response;
+        export const FormData = g.FormData;
+        export const WebSocket = g.WebSocket;
+        export const MessageEvent = g.MessageEvent;
+        export const CloseEvent = g.CloseEvent;
+        export const EventSource = g.EventSource;
+        export const Dispatcher = unsupported("Dispatcher");
+        export const Agent = unsupported("Agent");
+        export const ProxyAgent = unsupported("ProxyAgent");
+        export const EnvHttpProxyAgent = unsupported("EnvHttpProxyAgent");
+        export const setGlobalDispatcher = () => {};
+        export const getGlobalDispatcher = () => undefined;
+        export default { fetch, Headers, Request, Response, FormData, WebSocket, MessageEvent, CloseEvent, EventSource, Dispatcher, Agent, ProxyAgent, EnvHttpProxyAgent, setGlobalDispatcher, getGlobalDispatcher };
+      `,
+    }))
+  },
+}
 const bunfsRoot = "/$bunfs/root/"
 const workerRelativePath = path.relative(OPENCODE_DIR, parserWorkerResolved).replaceAll("\\", "/")
 
 const result = await Bun.build({
   conditions: ["bun", "node"],
   tsconfig: "./tsconfig.json",
-  plugins: [plugin],
+  plugins: [plugin, undiciShim],
   external: ["node-gyp"],
   format: "esm",
-  minify: true,
+  // Identifier mangling produced an undeclared symbol at runtime ("aOj is not defined").
+  // Keep whitespace/syntax minification but leave identifiers alone unless
+  // OPENCODE_MINIFY_IDENTIFIERS=1; error messages also become readable.
+  minify: { whitespace: true, syntax: true, identifiers: process.env.OPENCODE_MINIFY_IDENTIFIERS === "1" },
   sourcemap: "none",
   // Cross-chunk imports break at runtime on the Android Bun 1.2.13 runtime
   // ("OX is not a function" from a chunk import). Bundle without chunk splitting
@@ -149,22 +192,50 @@ const modOff = moduleGraph.readUInt32LE(mgOffsetsStart + 8)
 const modLen = moduleGraph.readUInt32LE(mgOffsetsStart + 12)
 console.log(`String data region: [0, ${modOff}), Module list bytes: ${modLen}`)
 
-const undiciSearch = Buffer.from("__reExport(exports_Undici, undici)")
-const undiciReplace = Buffer.from("__reExport(exports_Undici, Undici)")
+// Bun's bundler keeps the external default import (`import Undici from
+// "undici"`) but drops the namespace binding, leaving the body reference
+// `__reExport(exports_Undici, undici)` -- which throws "ReferenceError: undici
+// is not defined" as soon as @effect/platform-node's index initializes its
+// Undici module. Re-point that reference at the default import, which the
+// runtime resolves to Bun's builtin thirdparty/undici (fetch + dispatcher
+// classes).
+//
+// Two hard constraints on this patch:
+//  1. It must be byte-length preserving. The string data region is addressed
+//     by absolute StringPointers in the module list, and the file ends with a
+//     total_byte_count footer; growing/shrinking the region corrupts both.
+//     `undici` -> `Undici` is 6 -> 6 bytes, so only the token is swapped.
+//  2. It must be whitespace tolerant. minify.whitespace strips the space after
+//     the comma, so the previous fixed-string search for
+//     "__reExport(exports_Undici, undici)" matched 0 occurrences, only printed
+//     a warning, and shipped a binary that crashed on startup.
+const strDataRegion = moduleGraph.subarray(0, modOff)
 let undiciPatchCount = 0
-let searchPos = 0
-const strDataRegion = moduleGraph.slice(0, modOff)
-while (true) {
-  const pos = strDataRegion.indexOf(undiciSearch, searchPos)
-  if (pos < 0) break
-  undiciReplace.copy(moduleGraph, pos)
-  undiciPatchCount++
-  searchPos = pos + undiciSearch.length
+const patchedRegionStr = strDataRegion
+  .toString("latin1")
+  .replace(/__reExport\(([\w$]+)(\s*,\s*)undici\)/g, (_match, ident: string, sep: string) => {
+    undiciPatchCount++
+    return `__reExport(${ident}${sep}Undici)`
+  })
+const patchedRegion = Buffer.from(patchedRegionStr, "latin1")
+if (patchedRegion.length !== modOff) {
+  console.error(`ERROR: undici patch changed the string region size (${modOff} -> ${patchedRegion.length})`)
+  process.exit(1)
 }
+patchedRegion.copy(moduleGraph, 0)
+
 if (undiciPatchCount === 0) {
-  console.warn("WARNING: undici global patch pattern not found; continuing")
+  console.warn("WARNING: no __reExport(<ident>, undici) occurrence found in the module graph")
+  console.warn("         The bundler output may have changed; check for a bare 'undici' identifier manually")
 } else {
   console.log(`Patched ${undiciPatchCount} undici occurrence(s)`)
+}
+
+// Fail loudly instead of shipping a binary that crashes with
+// "ReferenceError: undici is not defined".
+if (/__reExport\([\w$]+\s*,\s*undici\)/.test(patchedRegionStr)) {
+  console.error("ERROR: unpatched __reExport(..., undici) reference still present in the module graph")
+  process.exit(1)
 }
 
 console.log("\n=== Step 6: Creating Android standalone binary ===")

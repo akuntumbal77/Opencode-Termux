@@ -46,6 +46,60 @@ check_needed() {
         || die "$name is missing NEEDED: $library"
 }
 
+# Guard against the regression that shipped opencode 1.18.34 with a crashing
+# startup: the module-graph patch in build-opencode-android.ts must rewrite
+# __reExport(<ident>, undici) to __reExport(<ident>, Undici), otherwise the
+# binary dies immediately with "ReferenceError: undici is not defined".
+check_undici_patch() {
+    local file="$1"
+    local name="$2"
+
+    if grep -qaF '__reExport(exports_Undici,undici)' "$file" \
+        || grep -qaF '__reExport(exports_Undici, undici)' "$file"; then
+        die "$name contains an unpatched __reExport(..., undici) reference (crashes with 'ReferenceError: undici is not defined')"
+    fi
+
+    if grep -qaF '__reExport(exports_Undici,Undici)' "$file"; then
+        echo "    $name: undici reExport patch present"
+    else
+        echo "    WARNING: $name: patched undici marker not found (bundler output may have changed)" >&2
+    fi
+}
+
+# Guard against the second startup crash: opentui calls
+# normalizeLoadedFilePath() with the default export of the tree-sitter worker
+# asset at module top level, but parser.worker.js is side-effect-only
+# (`export {};`), so the value is undefined and the TUI dies with
+# "undefined is not an object (evaluating 'loadedPath.startsWith')".
+# build-opencode.sh inserts a null guard; fail the package if it is missing.
+check_opentui_null_guard() {
+    local file="$1"
+    local name="$2"
+    python3 - "$file" "$name" <<'PY' || die "opentui normalizeLoadedFilePath null-guard check failed"
+import re
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+data = open(path, "rb").read()
+i = data.find(b"function normalizeLoadedFilePath")
+if i == -1:
+    print(f"    WARNING: {name}: normalizeLoadedFilePath not found (opentui layout may have changed)", file=sys.stderr)
+    sys.exit(0)
+brace = data.find(b"{", i)
+if brace == -1 or brace - i > 200:
+    raise SystemExit(f"ERROR: {name}: normalizeLoadedFilePath header looks malformed")
+header = data[i:brace].decode("latin-1")
+m = re.search(r"function\s+normalizeLoadedFilePath\w*\s*\(\s*([\w$]+)", header)
+if not m:
+    raise SystemExit(f"ERROR: {name}: could not parse normalizeLoadedFilePath parameters")
+param = m.group(1)
+body = data[brace + 1:brace + 121].decode("latin-1")
+if not re.search(r"if\s*\(\s*" + re.escape(param) + r"\s*==\s*null", body):
+    raise SystemExit(f"ERROR: {name}: normalizeLoadedFilePath lacks the null guard (crashes startup with 'loadedPath.startsWith')")
+print(f"    {name}: opentui normalizeLoadedFilePath null guard present")
+PY
+}
+
 check_wrapper() {
     local wrapper="$1"
     grep -q '../libexec/opencode/opencode.bin' "$wrapper" \
@@ -70,6 +124,8 @@ check_tree() {
 
     check_wrapper "$prefix/bin/opencode"
     check_elf_aarch64 "$prefix/libexec/opencode/opencode.bin" "opencode.bin"
+    check_undici_patch "$prefix/libexec/opencode/opencode.bin" "opencode.bin"
+    check_opentui_null_guard "$prefix/libexec/opencode/opencode.bin" "opencode.bin"
     check_elf_aarch64 "$prefix/lib/libtagfix.so" "libtagfix.so"
     check_elf_aarch64 "$prefix/lib/libopentui.so" "libopentui.so"
     check_no_glibc_deps "$prefix/lib/libopentui.so" "libopentui.so"
@@ -96,6 +152,8 @@ check_zip() {
 
     check_wrapper "$root/opencode"
     check_elf_aarch64 "$root/opencode.bin" "zip opencode.bin"
+    check_undici_patch "$root/opencode.bin" "zip opencode.bin"
+    check_opentui_null_guard "$root/opencode.bin" "zip opencode.bin"
     check_elf_aarch64 "$root/libtagfix.so" "zip libtagfix.so"
     check_elf_aarch64 "$root/libopentui.so" "zip libopentui.so"
     check_elf_aarch64 "$root/libc++_shared.so" "zip libc++_shared.so"

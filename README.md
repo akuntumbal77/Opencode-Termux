@@ -261,6 +261,8 @@ We can't use Bun 1.2.13 as host either, because OpenCode's monorepo uses `catalo
 | Raw `rt_sigaction`/`rt_sigprocmask` syscalls | Zig's struct layout doesn't match Bionic's; bypass libc entirely |
 | NDK `libc.so` stub linked into `libopentui.so` | Zig doesn't provision Android libc; explicit link needed for `dlopen` symbol resolution |
 | Module graph extracted via trailer, not `process.execPath` | `process.execPath` is unreliable in CI; trailer-based extraction is version-agnostic |
+| `__reExport(<ident>, undici)` re-pointed to `Undici` in the module graph | Bun's bundler drops the namespace binding for the bare `undici` import, so `@effect/platform-node` dies at startup with `ReferenceError: undici is not defined`. Patched in `build-opencode-android.ts` (byte-length preserving, hard-fails if the pattern no longer matches) |
+| Null guard in opentui's `normalizeLoadedFilePath()` | `@opentui/core/parser.worker.js` is side-effect-only (`export {};`), so the top-level `bundledTreeSitterWorkerPath = await resolveBundledFilePath(...)` passes `undefined` and dies with `undefined is not an object (evaluating 'loadedPath.startsWith')`. The real worker path comes from `TreeSitterClient.resolveWorkerPath()`, never from this value, so returning `""` is safe. Patched in `build-opencode.sh` |
 
 ---
 
@@ -313,6 +315,7 @@ The Bun team [closed Android support as "not planned"](https://github.com/oven-s
 | Patch | Upstreamable? | Notes |
 |-------|:---:|-------|
 | NDK libc.so stub linking for Android | Yes | Clean, conditionally compiled, needed for any Android target |
+| Null guard in `normalizeLoadedFilePath()` | Yes | Genuine bug: `resolveBundledFilePath()` passes `.default` of a side-effect-only asset module (`parser.worker.js` is `export {};`), so the value can be `undefined`. Guarding the normalizer degrades gracefully instead of crashing the process |
 
 **Recommendation**: Submit a PR to `anomalyco/opentui`. The patch correctly detects Android targets in `build.zig` and links the NDK's `libc.so` stub only when targeting `aarch64-linux-android`. It's a small, self-contained change that enables Android support without affecting other targets.
 
@@ -358,7 +361,10 @@ places where the Android build touches upstream code:
    (`OPENCODE_MODELS_DEV`, `OTUI_TREE_SITTER_WORKER_PATH`,
    `OPENCODE_WORKER_PATH`, `FFF_LIBC`, `OPENCODE_LIBC`, `process.env.OPENTUI_LIBC`),
    the worker entry point (`src/cli/tui/worker.ts`), and the
-   `@opentui/core/parser.worker` resolution.
+   `@opentui/core/parser.worker` resolution. Step 5's module-graph patch
+   (`__reExport(<ident>, undici)` → `Undici`) is byte-length preserving and
+   hard-fails if an unpatched reference survives, so a bundler output change
+   surfaces as a build error instead of a crashing binary.
 4. **`scripts/build-opencode.sh`** — the source patches are regex/perl/python
    and are guarded by `if [ -f ... ]` / pattern checks, so a layout change in
    upstream usually means a patch silently no-ops rather than failing. After a
@@ -371,6 +377,10 @@ places where the Android build touches upstream code:
      `chunk-bun-*.js`; older releases used `index-*.js`) and its FFI wrapper
      patterns (`isBunfsPath`, `toNumber`, the `textBufferView*` symbol calls,
      `useFeedOutput`, `Audio.create`)
+   - `node_modules/@opentui/core/*.js` — the `normalizeLoadedFilePath` null
+     guard (section 7). This one hard-fails if no `@opentui/core` JS file is
+     found at all, and warns (rather than failing) if the function name/layout
+     changed; `check_opentui_null_guard` catches the latter.
 5. **`scripts/build-opentui.sh`** — the audio-stub dict must cover every
    `export fn audio*` in the pinned opentui tag's `lib.zig` (a missing
    signature makes the python patch `SystemExit`; an extra one just no-ops).
@@ -382,6 +392,12 @@ places where the Android build touches upstream code:
    reads. Bun >= 1.3.11 emits a 52-byte stride and the binary OOMs on startup.
    If a new OpenCode release needs a Bun feature newer than 1.3.2 to *bundle*,
    the Android Bun target itself must be bumped and all Bun patches rebased.
+8. **`scripts/verify-packages.sh`** — the safety net for 3 and 4.
+   `check_undici_patch` fails if an unpatched `__reExport(<ident>, undici)`
+   reference survives (would crash with `ReferenceError: undici is not
+   defined`), and `check_opentui_null_guard` fails if `normalizeLoadedFilePath`
+   lacks the null guard (would crash with `loadedPath.startsWith`). Both run in
+   CI before the artifacts are uploaded.
 
 The module-graph transplant is format-sensitive but not version-sensitive: as
 long as host and target Bun agree on the stride, only the bundling contract
