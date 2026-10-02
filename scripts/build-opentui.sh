@@ -214,18 +214,19 @@ span_text = replace_export_body(
 )
 span_feed_zig.write_text(span_text)
 
-# === NEW: PENGGANTI SED, INJEKSI MENGGUNAKAN PYTHON REGEX ===
+# Zig only treats the module as "linking libc" when link_libc is set. The patch
+# supplies --libc (setLibCFile) but never enables it, so std.heap.c_allocator
+# fails with "dependency on libc must be explicitly specified". Enable it on the
+# Android library right after the libc file is set.
 if build_zig.exists():
     b_text = build_zig.read_text()
-    
-    # Sisipkan linkLibC() sebelum linkLibCpp() dipanggil
-    b_text = re.sub(r'([a-zA-Z0-9_]+)\.linkLibCpp\(\);', r'\1.linkLibC();\n    \1.linkLibCpp();', b_text)
-    
-    # Sisipkan linkLibC() sebelum b.installArtifact() dipanggil
-    b_text = re.sub(r'b\.installArtifact\(([a-zA-Z0-9_]+)\);', r'\1.linkLibC();\n    b.installArtifact(\1);', b_text)
-    
+    marker = "lib.setLibCFile(libc_file);"
+    if marker not in b_text:
+        raise SystemExit("ERROR: setLibCFile marker not found in build.zig (patch not applied?)")
+    if "lib.linkLibC();" not in b_text:
+        b_text = b_text.replace(marker, marker + "\n                lib.linkLibC();", 1)
     build_zig.write_text(b_text)
-    print(">>> [Python] Successfully injected linkLibC() into build.zig", file=sys.stderr)
+    print(">>> [Python] Injected lib.linkLibC() after setLibCFile", file=sys.stderr)
 PY
 fi
 
