@@ -31,12 +31,13 @@ env:
   ICU_VERSION: "75.1"
   ZIG_VERSION: "0.15.2"
   JOBS: "4"
-  WORK_DIR: "/mnt/spindrive/opencode-build"
+  # MENGGUNAKAN WORKSPACE GITHUB ALIH-ALIH /mnt/spindrive
+  WORK_DIR: "${{ github.workspace }}/opencode-build"
 
 jobs:
   build:
     name: Build Android aarch64
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04 # MENGGUNAKAN SERVER GITHUB
     timeout-minutes: 360
     permissions:
       contents: write
@@ -73,7 +74,7 @@ jobs:
         run: |
           mkdir -p "$WORK_DIR"
           echo "Work directory: $WORK_DIR"
-          df -h /mnt/spindrive
+          df -h . # DIPERBAIKI: Mengecek penyimpanan di workspace saat ini
 
       # =============================================
       # Install build dependencies
@@ -389,7 +390,7 @@ jobs:
           rm -rf "${WORK_DIR}/webkit-build"
           rm -rf "${WORK_DIR}/bun-build/cache/zig"
           echo "Cleaned up intermediate files"
-          df -h /mnt/spindrive
+          df -h . # DIPERBAIKI: Mengecek penyimpanan di workspace saat ini
 
       # =============================================
       # Telegram Notification: FINISHED
