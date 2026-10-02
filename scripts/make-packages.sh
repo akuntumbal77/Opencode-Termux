@@ -214,14 +214,16 @@ if [ -f "$PKG_DIR/librust_pty_arm64.so" ]; then
 fi
 zip -9 "$PKG_DIR/$ZIP_NAME" $ZIP_FILES
 
-# Add debug variant to the same ZIP if it was built
+# Debug variant (unstripped bun-profile, very large) goes in its OWN zip so the
+# normal package stays small.
 if [ -f "$OPENCODE_DEBUG_BINARY" ] && [ -f "$DEBUG_WRAPPER_SCRIPT" ]; then
     cp "$OPENCODE_DEBUG_BINARY" "$PKG_DIR/opencode-debug.bin"
     cp "$DEBUG_WRAPPER_SCRIPT"  "$PKG_DIR/opencode-debug"
     chmod 755 "$PKG_DIR/opencode-debug" "$PKG_DIR/opencode-debug.bin"
     cd "$PKG_DIR"
-    zip -9 "$PKG_DIR/$ZIP_NAME" opencode-debug opencode-debug.bin
-    echo "    Added debug variant (opencode-debug / opencode-debug.bin) to $ZIP_NAME"
+    DEBUG_ZIP_NAME="opencode-${OPENCODE_VERSION}-android-aarch64-debug.zip"
+    zip -9 "$PKG_DIR/$DEBUG_ZIP_NAME" opencode-debug opencode-debug.bin
+    echo "    Created $DEBUG_ZIP_NAME (separate debug package)"
 fi
 echo "    Created $ZIP_NAME"
 
