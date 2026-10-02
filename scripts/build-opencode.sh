@@ -251,6 +251,15 @@ if "OPENTUI_LIB_PATH" not in text and "isBunfsPath(targetLibPath)" in text:
     # platform package), and isBunfsPath(undefined) then throws
     # "undefined is not an object (evaluating '$.startsWith')" before our
     # override can run. Guard the call so the override below always gets a turn.
+    # The resolver itself (platform key lookup) can throw on Android, and the
+    # surrounding try/catch rethrows it later as the startup crash. Prefer the
+    # explicit override and never let the resolver's failure escape.
+    if not sub(
+        r'(targetLibPath\s*=\s*)await\s+([A-Za-z_$][\w$.]*)\(([^()]*)\)',
+        lambda m: (m.group(1) + 'process.env["OPENTUI_LIB_PATH"] || await (async () => { try { return await '
+                   + m.group(2) + '(' + m.group(3) + '); } catch (_e) { return undefined; } })()'),
+    ):
+        print("WARNING: opentui lib-path resolver call not found; override not hoisted", file=sys.stderr)
     sub(
         r'if \(isBunfsPath\(targetLibPath\)\) \{',
         'if (targetLibPath && isBunfsPath(targetLibPath)) {',
