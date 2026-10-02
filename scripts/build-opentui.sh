@@ -229,6 +229,12 @@ span_feed_zig.write_text(span_text)
 PY
 fi
 
+# --- FIX UNTUK ZIG 0.15+ LIBC LINKING ---
+echo ">>> Injecting linkLibC() for Zig 0.15 compatibility..."
+find "$OPENTUI_SRC" -name "build.zig" -type f -exec sed -i 's/b.installArtifact(\(.*\));/\1.linkLibC();\n    b.installArtifact(\1);/g' {} +
+find "$OPENTUI_SRC" -name "build.zig" -type f -exec sed -i 's/\([a-zA-Z0-9_]*\)\.install();/\1.linkLibC();\n    \1.install();/g' {} +
+# ----------------------------------------
+
 echo ">>> Building with Zig (target: aarch64-linux-android)..."
 cd "$OPENTUI_ZIG_DIR"
 
