@@ -313,14 +313,36 @@ jobs:
       # =============================================
       # Upload artifacts
       # =============================================
-      - name: Upload packages as artifacts
+      # Separate artifacts so each file can be downloaded on its own
+      # (already-compressed files, so no extra compression needed).
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: opencode-termux-${{ env.OPENCODE_VERSION }}
-          path: |
-            ${{ env.WORK_DIR }}/packages/*.zip
-            ${{ env.WORK_DIR }}/packages/*.pkg.tar.xz
-            ${{ env.WORK_DIR }}/packages/*.deb
+          name: opencode-${{ env.OPENCODE_VERSION }}-zip
+          path: ${{ env.WORK_DIR }}/packages/opencode-${{ env.OPENCODE_VERSION }}-android-aarch64.zip
+          compression-level: 0
+
+      - name: Upload pacman package
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-${{ env.OPENCODE_VERSION }}-pacman
+          path: ${{ env.WORK_DIR }}/packages/*.pkg.tar.xz
+          compression-level: 0
+
+      - name: Upload deb package
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-${{ env.OPENCODE_VERSION }}-deb
+          path: ${{ env.WORK_DIR }}/packages/*.deb
+          compression-level: 0
+
+      - name: Upload debug zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-${{ env.OPENCODE_VERSION }}-debug
+          path: ${{ env.WORK_DIR }}/packages/*-debug.zip
+          if-no-files-found: ignore
+          compression-level: 0
 
       # =============================================
       # Release (tag push, or explicit manual pre-release)
