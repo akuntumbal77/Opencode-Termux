@@ -395,25 +395,15 @@ if [ -f "$AUDIO_TS" ]; then
     fi
 fi
 
-# 5. Add diagnostic logging around the TUI render pipeline.
-#    The TUI can hang on Android with no output; these markers tell us whether
-#    the effect scope starts and how far rendering gets. In OpenCode 1.18 the
-#    TUI lives in the @opencode-ai/tui workspace and drives the renderer
-#    through Effect, so we instrument the two unique anchors there.
+# 5. Strip leftover TUI diagnostic logging (older builds injected
+#    console.error("[OPENCODE_ANDROID_DIAG] ...") markers into the TUI source).
 APP_TSX="$OPENCODE_SRC/packages/tui/src/app.tsx"
 if [ ! -f "$APP_TSX" ]; then
     APP_TSX="$OPENCODE_PKG/src/cli/cmd/tui/app.tsx"
 fi
-if [ -f "$APP_TSX" ]; then
-    if ! grep -q "OPENCODE_ANDROID_DIAG" "$APP_TSX"; then
-        perl -i -pe '
-            s/^(\s*)const result = yield\* Effect\.scoped\(\n/$1console.error("[OPENCODE_ANDROID_DIAG] before TUI effect scope");\n$1const result = yield* Effect.scoped(\n/;
-            s/^(\s*)await render\(\(\) => \{/$1console.error("[OPENCODE_ANDROID_DIAG] before render");\n$1await render(() => {/;
-        ' "$APP_TSX"
-        echo "    Patched $APP_TSX (TUI diagnostics)"
-    else
-        echo "    $APP_TSX already patched"
-    fi
+if [ -f "$APP_TSX" ] && grep -q "OPENCODE_ANDROID_DIAG" "$APP_TSX"; then
+    perl -i -ne 'print unless /OPENCODE_ANDROID_DIAG/' "$APP_TSX"
+    echo "    Removed TUI diagnostics from $APP_TSX"
 fi
 
 # 6. Work around missing type-only AWS ESM exports that Bun 1.3.2 still tries
